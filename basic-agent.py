@@ -1,4 +1,3 @@
-import os
 import json
 import requests
 
@@ -63,11 +62,6 @@ def get_weather_for_location(city: str) -> str:
             "error": f"Failed to geocode city '{city}': {e}"
         })
 
-    # Open-Meteo Weather Forecast API: up to 16 days; we’ll request 15.
-    # We'll use daily:
-    #   - temperature_2m_max / _min
-    #   - precipitation_probability_max
-    #   - precipitation_sum
     forecast_url = "https://api.open-meteo.com/v1/forecast"
     forecast_params = {
         "latitude": lat,
@@ -114,10 +108,7 @@ def get_weather_for_location(city: str) -> str:
             "precipitation_probability_max": pop_max[i] if i < len(pop_max) else None,
             "precipitation_sum_mm": precip_sum[i] if i < len(precip_sum) else None,
         })
-    
-    print("\n🤖 Weather forecast:\n")
-    print(days)
-    
+
     result = {
         "city": resolved_name,
         "country": country,
@@ -133,30 +124,26 @@ def get_weather_for_location(city: str) -> str:
     return json.dumps(result)
 
 
-# ---------------------- Tool 2: Search tourist attractions ----------------------
+# ---------------------- Tool 2: Search tourist spots via Wikipedia GeoSearch ----------------------
 
 
 @tool
 def search_tourist_spots(city: str) -> str:
     """
-    Search top ~20 tourist attractions in the given city using OpenTripMap.
+    Search up to ~20 notable nearby places using Wikipedia GeoSearch.
 
-    Returns a JSON string with:
-      - city, country
-      - attractions: list of up to 20 objects with:
-          - name
-          - kinds
-          - dist_m (approx distance from city center)
-          - osm, xid (IDs if needed)
-    Requires OPEN_TRIPMAP_API_KEY to be set in environment.
+    Steps:
+      - Geocode city with Open-Meteo to get (lat, lon).
+      - Call Wikipedia GeoSearch around that point.
+    Returns a JSON string:
+      - city, country, latitude, longitude
+      - attractions: list of objects with:
+          - title
+          - pageid
+          - dist_m (distance from center)
+          - lat, lon
+    No API key required.
     """
-    api_key = os.getenv("OPEN_TRIPMAP_API_KEY")
-    if not api_key:
-        return json.dumps({
-            "error": "OPEN_TRIPMAP_API_KEY is not set in environment."
-        })
-
-    # 1) Geocode city with Open-Meteo (reusing function above)
     try:
         lat, lon, resolved_name, country = geocode_city_open_meteo(city)
     except Exception as e:
@@ -164,43 +151,45 @@ def search_tourist_spots(city: str) -> str:
             "error": f"Failed to geocode city '{city}': {e}"
         })
 
-    # 2) Use OpenTripMap "places/radius" endpoint to get POIs near that coordinate
-    # Docs: https://dev.opentripmap.org/ (Places list, radius search)
-    # We filter for main tourist-related categories & ask for rating
-    radius = 15000  # 15km around city center
-    places_url = "https://api.opentripmap.com/0.1/en/places/radius"
-    places_params = {
-        "radius": radius,
-        "lon": lon,
-        "lat": lat,
-        "kinds": "tourist_facilities,interesting_places,cultural,historic,architecture,natural",
-        "limit": 20,
-        "rate": 2,          # 1-3; 3 is best, but we allow 2+ for enough results
+    wiki_url = "https://en.wikipedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "list": "geosearch",
+        "gscoord": f"{lat}|{lon}",
+        "gsradius": 15000,   # 15km radius
+        "gslimit": 20,
         "format": "json",
-        "apikey": api_key,
     }
 
     try:
-        p_resp = requests.get(places_url, params=places_params, timeout=10)
-        p_resp.raise_for_status()
-        p_data = p_resp.json()
+        resp = requests.get(wiki_url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as e:
         return json.dumps({
-            "error": f"Failed to fetch tourist spots for '{city}': {e}"
+            "error": f"Failed to fetch nearby places from Wikipedia: {e}"
         })
 
+    geosearch = data.get("query", {}).get("geosearch", [])
     attractions = []
-    for item in p_data:
+    for item in geosearch:
         attractions.append({
-            "name": item.get("name"),
-            "kinds": item.get("kinds"),
+            "title": item.get("title"),
+            "pageid": item.get("pageid"),
             "dist_m": item.get("dist"),
-            "osm": item.get("osm"),
-            "xid": item.get("xid"),
+            "lat": item.get("lat"),
+            "lon": item.get("lon"),
         })
-    
-    print("\n🤖 Top 20 spots:\n")
-    print(attractions)
+
+    if not attractions:
+        return json.dumps({
+            "warning": "No nearby places found via Wikipedia GeoSearch.",
+            "city": resolved_name,
+            "country": country,
+            "latitude": lat,
+            "longitude": lon,
+            "attractions": [],
+        })
 
     result = {
         "city": resolved_name,
@@ -209,8 +198,8 @@ def search_tourist_spots(city: str) -> str:
         "longitude": lon,
         "attractions": attractions,
         "notes": (
-            "Attractions from OpenTripMap within ~15km radius. "
-            "Use name + kinds for itinerary planning."
+            "Attractions are nearby Wikipedia pages via GeoSearch within ~15km radius. "
+            "They include landmarks and notable places that can be used as tourist spots."
         ),
     }
 
@@ -242,21 +231,23 @@ def main():
             "1) get_weather_for_location(city): returns a JSON string with 15 days of daily "
             "   weather forecast for that city (dates, temp_max_c, temp_min_c, "
             "   precipitation_probability_max, precipitation_sum_mm).\n"
-            "2) search_tourist_spots(city): returns a JSON string with up to 20 top attractions "
-            "   in that city (name, kinds, dist_m, etc.).\n\n"
+            "2) search_tourist_spots(city): returns a JSON string with up to 20 nearby notable "
+            "   places from Wikipedia GeoSearch (title, pageid, dist_m, lat, lon).\n\n"
             "Your task:\n"
             "- First, call BOTH tools for the given city.\n"
             "- Parse their JSON outputs.\n"
             "- Then construct a detailed 15-day sightseeing itinerary that:\n"
             "    * Maps specific attractions to specific dates.\n"
             "    * Uses weather data intelligently: on high-rain-probability days, prefer more "
-            "      indoor/covered attractions; on good-weather days, prioritize outdoor or "
-            "      view-heavy spots.\n"
+            "      indoor/covered attractions or shorter days; on good-weather days, prioritize "
+            "      outdoor or view-heavy spots.\n"
             "    * Keeps each day realistic: usually 2–4 attractions per day depending on type.\n"
             "    * Mentions the date and a short description per day.\n"
             "    * If there are fewer attractions than 15 days, spread them thoughtfully and "
             "      add some 'flex/relax' days with suggestions.\n"
-            "- If any tool returns an error, explain the problem clearly to the user.\n"
+            "- If any tool returns an 'error' or 'warning', explain the problem clearly and "
+            "  still try to propose a reasonable high-level plan using whatever information "
+            "  you do have.\n"
             "Output the final answer as a clearly structured day-by-day itinerary, "
             "WITHOUT showing raw JSON or tool logs."
         ),
@@ -264,7 +255,7 @@ def main():
 
     user_message = (
         f"Plan a detailed 15-day sightseeing itinerary for {city}. "
-        "Use both the weather forecast and top tourist attractions to decide "
+        "Use both the 15-day weather forecast and the nearby places data to decide "
         "which places to visit on which days."
     )
 
